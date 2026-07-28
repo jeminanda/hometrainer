@@ -1,0 +1,7 @@
+numpy
+opencv-python
+mediapipe
+scipy
+scikit-learn
+torch
+matplotlib
