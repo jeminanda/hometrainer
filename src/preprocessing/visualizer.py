@@ -73,7 +73,7 @@ CONNECTION_GROUPS = [
 
 def animate_skeleton_2d(
     landmarks_sequence: np.ndarray,
-    save_path: str = None,
+    save_path: str = "tests/",
     title: str = "2D Skeleton Animation",
 ):
     """[시각화] 2D 랜드마크 시퀀스(N_frames, 33, 2 이상의 차원)를 2D 평면 상에서 애니메이션으로 시각화합니다.
