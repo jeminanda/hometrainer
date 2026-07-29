@@ -1,42 +1,41 @@
 import numpy as np
 
-def normalize_landmarks(landmarks: np.ndarray) -> np.ndarray:
+
+def normalize_landmarks(landmarks: np.ndarray, n_spatial_dims: int = 2) -> np.ndarray:
+    """3D(또는 2D) 랜드마크를 골반 중앙점 기준으로 정규화.
+
+    landmarks: (33, C) 또는 (N_frames, 33, C)
+    n_spatial_dims: 실제 좌표 채널 수. z가 없는 (x, y, visibility) 데이터라면
+                    반드시 2로 지정해야 visibility가 z로 오인되지 않는다.
     """
-    3D 랜드마크 좌표를 골반 중앙점 기준으로 정규화합니다.
-    
-    landmarks: shape (33, 3) 또는 (N_frames, 33, 3) 
-               (x, y, z 좌표를 포함하는 MediaPipe Pose 랜드마크)
-               
-    MediaPipe Pose Landmark Index:
-    - 11: Left Shoulder, 12: Right Shoulder
-    - 23: Left Hip, 24: Right Hip
-    """
-    is_single_frame = (landmarks.ndim == 2)
+    is_single_frame = landmarks.ndim == 2
     if is_single_frame:
-        landmarks = np.expand_dims(landmarks, axis=0) # (1, 33, 3) 형태로 변환
+        landmarks = np.expand_dims(landmarks, axis=0)
 
-    # 1. 골반 중앙점 (Mid-Hip) 계산 (Index 23, 24)
-    left_hip = landmarks[:, 23, :]
-    right_hip = landmarks[:, 24, :]
-    mid_hip = (left_hip + right_hip) / 2.0  # shape: (N_frames, 3)
+    N_frames, J, C = landmarks.shape
+    if C < n_spatial_dims:
+        raise ValueError(f"n_spatial_dims={n_spatial_dims}인데 채널 수 C={C}로는 부족합니다.")
 
-    # 2. 중심 이동 (Mid-Hip을 원점 (0,0,0)으로 설정)
-    # broadcasting을 활용하여 모든 랜드마크에서 mid_hip 좌표를 뺍니다.
-    centered_landmarks = landmarks - np.expand_dims(mid_hip, axis=1)
+    sl = slice(0, n_spatial_dims)
 
-    # 3. 신체 스케일 정규화 (Scale Invariance)
-    # 양 어깨(Index 11, 12) 사이의 거리를 계산하여 스케일 기준값으로 사용
-    left_shoulder = landmarks[:, 11, :]
-    right_shoulder = landmarks[:, 12, :]
-    shoulder_width = np.linalg.norm(left_shoulder - right_shoulder, axis=-1, keepdims=True) # shape: (N_frames, 1)
+    # MediaPipe 표준: 11=LEFT_SHOULDER, 12=RIGHT_SHOULDER, 23=LEFT_HIP, 24=RIGHT_HIP
+    left_hip, right_hip = landmarks[:, 23, sl], landmarks[:, 24, sl]
+    left_shoulder, right_shoulder = landmarks[:, 11, sl], landmarks[:, 12, sl]
 
-    # 0으로 나누어지는 것(Division by zero) 방지 (eps = 1e-6)
-    shoulder_width = np.maximum(shoulder_width, 1e-6)
+    mid_hip = (left_hip + right_hip) / 2.0
+    mid_shoulder = (left_shoulder + right_shoulder) / 2.0
 
-    # 4. 좌표를 어깨 너비로 나누어 스케일 정규화
-    normalized_landmarks = centered_landmarks / np.expand_dims(shoulder_width, axis=-1)
+    centered = landmarks.copy()
+    centered[:, :, sl] = landmarks[:, :, sl] - mid_hip[:, np.newaxis, :]
 
-    if is_single_frame:
-        return normalized_landmarks[0] # 원본 형태 (33, 3)로 복원
-        
-    return normalized_landmarks
+    # 어깨너비 대신 '몸통 길이'(어깨중심-힙중심) 사용: 더 길고 회전에 덜 민감함
+    torso_length = np.linalg.norm(mid_shoulder - mid_hip, axis=-1)  # (N_frames,)
+
+    # 프레임별로 따로 나누지 않고, 시퀀스 전체의 대표값(중앙값) 하나로 고정
+    # -> 애니메이션 재생 중 사람 크기가 프레임마다 출렁이는 것을 방지
+    reference_scale = np.median(torso_length)
+    reference_scale = max(reference_scale, 1e-3)  # 하한선도 더 현실적인 값으로 상향
+
+    centered[:, :, sl] = centered[:, :, sl] / reference_scale
+
+    return centered[0] if is_single_frame else centered
