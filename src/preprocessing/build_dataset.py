@@ -15,7 +15,8 @@ data/raw/ 의 pose_extraction 결과(키포인트 .npy)를 모두 순회하며
 
 출력 (data/processed/):
     - rep_sequences.npy : (전체 rep 수, target_length, J, C) 정규화된 rep 시퀀스
-    - rep_index.csv     : rep_sequences.npy의 각 행이 어느 (video_id, exercise, rep_idx)인지 매핑
+    - rep_features.csv  : rep_sequences.npy의 각 행이 어느 (video_id, exercise, rep_idx)인지 매핑 +
+                          feature_extraction이 계산한 각도 특징(min/max/rom/좌우대칭) 컬럼
     - build_log.json    : 성공/실패 로그
 """
 
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover
 
 from .angles import extract_exercise_angles
 from .coordiante_normalization import normalize_landmarks  # 파일명 오타(coordiante) 그대로 유지
+from .feature_extraction import extract_rep_features
 from .phase_normalization import normalize_phase
 from .rep_slicer import slice_repetitions
 
@@ -180,10 +182,13 @@ def process_source_file(
         [normalize_phase(rk, target_length=target_length) for rk in rep_keypoints_list], axis=0
     )  # (num_reps, target_length, J, C)
 
-    index_rows = [
-        {"video_id": source.video_id, "exercise": source.exercise, "rep_idx": rep_idx}
-        for rep_idx in range(len(rep_keypoints_list))
-    ]
+    # rep마다 채점 모델(scoring_model)이 바로 쓸 특징(min/max/rom/좌우대칭)도 함께 계산해둔다.
+    index_rows = []
+    for rep_idx in range(len(rep_keypoints_list)):
+        row = {"video_id": source.video_id, "exercise": source.exercise, "rep_idx": rep_idx}
+        row.update(extract_rep_features(rep_sequences[rep_idx], source.exercise))
+        index_rows.append(row)
+
     return index_rows, rep_sequences
 
 
@@ -232,9 +237,9 @@ def build_dataset(
         row["seq_index"] = i
 
     if pd is not None:
-        pd.DataFrame(all_index_rows).to_csv(output_dir / "rep_index.csv", index=False)
+        pd.DataFrame(all_index_rows).to_csv(output_dir / "rep_features.csv", index=False)
     else:
-        with open(output_dir / "rep_index.json", "w", encoding="utf-8") as f:
+        with open(output_dir / "rep_features.json", "w", encoding="utf-8") as f:
             json.dump(all_index_rows, f, ensure_ascii=False, indent=2)
 
     with open(output_dir / "build_log.json", "w", encoding="utf-8") as f:
