@@ -1,3 +1,4 @@
+from __future__ import annotations
 import numpy as np
 
 def calculate_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
@@ -63,3 +64,38 @@ def extract_exercise_angles(row_data: np.ndarray, exercise_type: str = "squat") 
             )
 
     return angles
+
+
+def select_reliable_side(
+    sequence: np.ndarray, exercise: str, joint_name: str | None = None, visibility_channel: int = -1
+) -> str:
+    """
+    측면 촬영에서는 카메라에 가까운 쪽 팔/다리가 먼 쪽을 가리거나, 먼 쪽이 몸통에
+    가려져 visibility가 구조적으로 낮게 나오는 경우가 흔하다 (예: pushup 영상에서
+    한쪽 팔꿈치가 영상 전체 내내 visibility<0.5인 케이스가 실제로 확인됨).
+
+    시퀀스 전체(또는 rep 하나)에서 좌/우 각각을 구성하는 관절들의 평균 visibility를
+    비교해 더 신뢰할 수 있는 쪽을 고른다.
+
+    Args:
+        sequence: (T, J, C) ndarray. visibility_channel=-1(기본값)은 항상 "마지막 채널"을
+            의미하므로, (x,y,visibility) 3채널이든 (x,y,z,visibility) 4채널이든
+            둘 다 그대로 잘 동작한다.
+        exercise: EXERCISE_JOINTS에 정의된 운동
+        joint_name: 비교할 관절 이름 (None이면 EXERCISE_JOINTS[exercise]의 첫 번째 관절 사용)
+
+    Returns:
+        "left" 또는 "right"
+    """
+    if exercise not in EXERCISE_JOINTS:
+        raise ValueError(f"정의되지 않은 exercise: {exercise}")
+
+    if joint_name is None:
+        joint_name = next(iter(EXERCISE_JOINTS[exercise]))
+    sides = EXERCISE_JOINTS[exercise][joint_name]
+
+    mean_visibility = {
+        side: float(np.mean(sequence[:, [a, b, c], visibility_channel]))
+        for side, (a, b, c) in sides.items()
+    }
+    return max(mean_visibility, key=mean_visibility.get)

@@ -3,12 +3,18 @@ src/preprocessing/feature_extraction.py
 
 preprocessing 파이프라인이 만든 정규화·위상정규화된 rep 시퀀스
 (target_length, 33, C)에서 채점 모델(scoring_model)이 바로 쓸 수 있는
-특징 벡터(관절 각도 min/max/ROM, 좌우 대칭성)를 추출한다.
+특징 벡터(관절 각도 min/max/ROM)를 추출한다.
+
+측면 촬영에서는 카메라에 가까운 쪽/먼 쪽 팔·다리 중 한쪽이 구조적으로 가려져
+visibility가 낮게 나오는 경우가 흔하다 (실측 사례: pushup 영상에서 한쪽 팔꿈치가
+영상 전체 내내 visibility<0.5). 이런 상황에서 좌우를 모두 특징으로 쓰면 신뢰할 수
+없는 쪽의 노이즈가 그대로 특징에 섞이고, 좌우 대칭성 특징은 아예 의미가 없어진다.
+그래서 좌우를 각각 특징화하는 대신, `select_reliable_side`로 더 신뢰도 높은 쪽
+하나만 골라 그 쪽의 각도만 특징으로 쓴다 (좌우 대칭성 특징은 제거).
 
 (원래 scoring_model 쪽에 있었으나, README에 명시된 preprocessing 범위
-"특징 추출: 관절 각도, ROM, 좌우 대칭성"에 해당하는 데이터 가공 로직이라
-preprocessing으로 옮김. 특정 채점 방식(Mahalanobis 등)에 종속되지 않으므로
-다른 모델을 시도해도 그대로 재사용 가능.)
+"특징 추출: 관절 각도, ROM 등"에 해당하는 데이터 가공 로직이라 preprocessing으로 옮김.
+특정 채점 방식(Mahalanobis 등)에 종속되지 않으므로 다른 모델을 시도해도 그대로 재사용 가능.)
 
 한 rep 시퀀스는 이미 다음 처리가 끝난 상태다 (preprocessing 모듈 기준):
     - coordiante_normalization.normalize_landmarks : 힙 중심 정렬 + 몸통 스케일
@@ -24,8 +30,8 @@ from __future__ import annotations
 
 import numpy as np
 
-# angles.py의 EXERCISE_JOINTS/calculate_angle을 그대로 재사용 (중복 정의 방지)
-from .angles import EXERCISE_JOINTS, calculate_angle
+# angles.py의 EXERCISE_JOINTS/calculate_angle/select_reliable_side를 그대로 재사용 (중복 정의 방지)
+from .angles import EXERCISE_JOINTS, calculate_angle, select_reliable_side
 
 
 def compute_angle_series(rep_sequence: np.ndarray, joint_triplet: tuple[int, int, int], n_dims: int = 2) -> np.ndarray:
@@ -49,14 +55,18 @@ def compute_angle_series(rep_sequence: np.ndarray, joint_triplet: tuple[int, int
     )
 
 
-def extract_rep_features(rep_sequence: np.ndarray, exercise: str, n_dims: int = 2) -> dict[str, float]:
+def extract_rep_features(
+    rep_sequence: np.ndarray, exercise: str, n_dims: int = 2, visibility_channel: int = -1
+) -> dict[str, float]:
     """
     rep 시퀀스 1개에서 exercise에 맞는 각도 기반 특징 딕셔너리를 추출.
+    좌우 중 이 rep에서 visibility가 더 높은 쪽만 사용한다 (select_reliable_side).
 
     반환 예 (pushup): {
-        "min_angle_elbow_left": ..., "max_angle_elbow_left": ..., "rom_elbow_left": ...,
-        "min_angle_elbow_right": ..., "max_angle_elbow_right": ..., "rom_elbow_right": ...,
-        "rom_symmetry_elbow": abs(rom_left - rom_right),
+        "min_angle_elbow": ..., "max_angle_elbow": ..., "rom_elbow": ...,
+        "reliable_side_elbow": "left" 또는 "right" (특징 벡터에는 포함하지 않는 메타데이터 —
+            build_dataset이 이 키를 감지해 rep_features.csv에 별도 컬럼으로만 남기고
+            학습용 특징 행렬에서는 제외한다)
     }
     """
     if exercise not in EXERCISE_JOINTS:
@@ -64,18 +74,14 @@ def extract_rep_features(rep_sequence: np.ndarray, exercise: str, n_dims: int = 
 
     features: dict[str, float] = {}
     for joint_name, sides in EXERCISE_JOINTS[exercise].items():
-        rom_by_side = {}
-        for side, triplet in sides.items():
-            series = compute_angle_series(rep_sequence, triplet, n_dims=n_dims)
-            min_a, max_a = float(np.min(series)), float(np.max(series))
-            rom = max_a - min_a
-            features[f"min_angle_{joint_name}_{side}"] = min_a
-            features[f"max_angle_{joint_name}_{side}"] = max_a
-            features[f"rom_{joint_name}_{side}"] = rom
-            rom_by_side[side] = rom
+        reliable_side = select_reliable_side(rep_sequence, exercise, joint_name, visibility_channel)
+        series = compute_angle_series(rep_sequence, sides[reliable_side], n_dims=n_dims)
+        min_a, max_a = float(np.min(series)), float(np.max(series))
 
-        if "left" in rom_by_side and "right" in rom_by_side:
-            features[f"rom_symmetry_{joint_name}"] = abs(rom_by_side["left"] - rom_by_side["right"])
+        features[f"min_angle_{joint_name}"] = min_a
+        features[f"max_angle_{joint_name}"] = max_a
+        features[f"rom_{joint_name}"] = max_a - min_a
+        features[f"reliable_side_{joint_name}"] = reliable_side  # 메타데이터 (문자열 - 특징 행렬 제외 대상)
 
     return features
 
@@ -85,12 +91,13 @@ def build_feature_matrix(
 ) -> tuple[np.ndarray, list[str]]:
     """
     여러 rep 시퀀스 (N, target_length, J, C)를 한 번에 특징 행렬 (N, num_features)로 변환.
+    `reliable_side_*` 메타데이터(문자열)는 학습용 숫자 행렬에서 제외한다.
 
     Returns:
         feature_matrix: (N, num_features)
-        feature_names: 컬럼 순서에 대응하는 이름 리스트
+        feature_names: 컬럼 순서에 대응하는 이름 리스트 (메타데이터 컬럼 제외)
     """
     all_features = [extract_rep_features(rep_sequences[i], exercise, n_dims=n_dims) for i in range(rep_sequences.shape[0])]
-    feature_names = list(all_features[0].keys())
+    feature_names = [k for k in all_features[0].keys() if not k.startswith("reliable_side_")]
     feature_matrix = np.array([[f[name] for name in feature_names] for f in all_features])
     return feature_matrix, feature_names

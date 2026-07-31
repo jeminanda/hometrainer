@@ -3,9 +3,10 @@ src/preprocessing/build_dataset.py
 
 data/raw/ 의 pose_extraction 결과(키포인트 .npy)를 모두 순회하며
 - coordiante_normalization.normalize_landmarks
-- angles.extract_exercise_angles (프레임 단위로 순회 호출)
+- angles.select_reliable_side (좌우 중 visibility 높은 쪽 선택) + calculate_angle
 - rep_slicer.slice_repetitions       (주의: (start_idx, end_idx) 인덱스 쌍을 반환함)
 - phase_normalization.normalize_phase
+- feature_extraction.extract_rep_features
 만을 사용해 전처리를 완료하고, 결과를 data/processed/ 에 저장한다.
 
 입력 파일 규칙 (기본):
@@ -16,7 +17,7 @@ data/raw/ 의 pose_extraction 결과(키포인트 .npy)를 모두 순회하며
 출력 (data/processed/):
     - rep_sequences.npy : (전체 rep 수, target_length, J, C) 정규화된 rep 시퀀스
     - rep_features.csv  : rep_sequences.npy의 각 행이 어느 (video_id, exercise, rep_idx)인지 매핑 +
-                          feature_extraction이 계산한 각도 특징(min/max/rom/좌우대칭) 컬럼
+                          feature_extraction이 계산한 각도 특징(min/max/rom) + reliable_side 메타데이터
     - build_log.json    : 성공/실패 로그
 """
 
@@ -36,7 +37,7 @@ try:
 except ImportError:  # pragma: no cover
     pd = None
 
-from .angles import extract_exercise_angles
+from .angles import EXERCISE_JOINTS, calculate_angle, select_reliable_side
 from .coordiante_normalization import normalize_landmarks  # 파일명 오타(coordiante) 그대로 유지
 from .feature_extraction import extract_rep_features
 from .phase_normalization import normalize_phase
@@ -94,10 +95,12 @@ def load_manifest(manifest_path: Path) -> list[SourceFile]:
 #  visibility가 낮은 부정확한 좌표가 그대로 각도 계산에 들어가기 때문에 인라인 처리)
 # -----------------------------
 
-def _mask_low_visibility(keypoints: np.ndarray, visibility_channel: int = 2, threshold: float = 0.5) -> np.ndarray:
-    """visibility가 threshold 미만인 관절의 (x, y)를 NaN으로 마스킹."""
-    if keypoints.shape[-1] <= visibility_channel:
-        return keypoints
+def _mask_low_visibility(keypoints: np.ndarray, visibility_channel: int = -1, threshold: float = 0.5) -> np.ndarray:
+    """
+    visibility가 threshold 미만인 관절의 (x, y)를 NaN으로 마스킹.
+    visibility_channel=-1(마지막 채널) 기본값: (x,y,visibility) 3채널이든
+    (x,y,z,visibility) 4채널이든 visibility는 항상 마지막 채널이므로 그대로 안전하게 동작한다.
+    """
     out = keypoints.copy()
     low_conf = out[..., visibility_channel] < threshold
     out[..., 0][low_conf] = np.nan
@@ -154,25 +157,24 @@ def process_source_file(
 
     normalized = normalize_landmarks(keypoints_masked, n_spatial_dims=2)  # (T, J, C)
 
-    # extract_exercise_angles는 프레임 1개만 받으므로, 시퀀스 전체 각도를 얻으려면 직접 순회한다.
-    T = normalized.shape[0]
-    per_frame_angles = [extract_exercise_angles(normalized[t], source.exercise) for t in range(T)]
-    angle_names = list(per_frame_angles[0].keys())
-    angle_series = {
-        name: np.array([frame_angles[name] for frame_angles in per_frame_angles])
-        for name in angle_names
-    }
+    # 측면 촬영에서는 한쪽 팔/다리가 구조적으로 가려지는 경우가 흔하므로(실측 확인됨),
+    # 영상 전체 기준으로 더 신뢰도 높은 쪽을 골라 그 쪽 각도만으로 rep 경계를 탐지한다.
+    joint_name = next(iter(EXERCISE_JOINTS[source.exercise]))
+    reliable_side = select_reliable_side(normalized, source.exercise, joint_name)
+    a_idx, b_idx, c_idx = EXERCISE_JOINTS[source.exercise][joint_name][reliable_side]
 
-    # rep 슬라이싱 기준 각도: 정의된 각도 중 첫 번째(squat->left_knee, pushup->left_elbow)
-    primary_angle_name = angle_names[0]
+    T = normalized.shape[0]
+    primary_angle_series = np.array(
+        [calculate_angle(normalized[t, a_idx, :2], normalized[t, b_idx, :2], normalized[t, c_idx, :2]) for t in range(T)]
+    )
 
     # slice_repetitions는 (start_idx, end_idx) '인덱스 쌍' 리스트를 반환한다 (슬라이싱된 배열이 아님!)
-    rep_index_pairs = slice_repetitions(angle_series[primary_angle_name], min_distance=min_distance)
+    rep_index_pairs = slice_repetitions(primary_angle_series, min_distance=min_distance)
 
     if len(rep_index_pairs) == 0:
         raise RuntimeError(
             f"{source.keypoints_path.name}: rep을 하나도 탐지하지 못했습니다 "
-            f"('{primary_angle_name}' 각도 기준 극소점 부족)."
+            f"('{joint_name}'({reliable_side}) 각도 기준 극소점 부족)."
         )
 
     # 반환된 인덱스로 실제 키포인트 구간을 직접 슬라이싱

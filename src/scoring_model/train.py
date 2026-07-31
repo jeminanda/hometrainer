@@ -26,6 +26,11 @@ from .reference_stats import fit_reference, save_reference
 META_COLUMNS = {"video_id", "exercise", "rep_idx", "seq_index"}
 
 
+def is_feature_column(col: str) -> bool:
+    """META_COLUMNS도 아니고 reliable_side_*(문자열 메타데이터)도 아닌 컬럼만 특징으로 취급."""
+    return col not in META_COLUMNS and not col.startswith("reliable_side_")
+
+
 def train_for_exercise(processed_dir: Path, exercise: str, output_dir: Path) -> None:
     rep_features_df = pd.read_csv(processed_dir / "rep_features.csv")
 
@@ -33,7 +38,7 @@ def train_for_exercise(processed_dir: Path, exercise: str, output_dir: Path) -> 
     if len(subset) == 0:
         raise ValueError(f"rep_features.csv에 exercise='{exercise}'인 rep이 없습니다.")
 
-    feature_names = [c for c in subset.columns if c not in META_COLUMNS]
+    feature_names = [c for c in subset.columns if is_feature_column(c)]
     feature_matrix = subset[feature_names].to_numpy()
     print(f"'{exercise}' rep {len(subset)}개로 학습 시작, 특징 벡터 shape: {feature_matrix.shape}")
     print(f"특징: {feature_names}")
