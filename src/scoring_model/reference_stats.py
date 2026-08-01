@@ -87,13 +87,21 @@ def save_reference(stats: ReferenceStats, path: Path) -> None:
 
 
 def load_reference(path: Path) -> ReferenceStats:
-    """저장된 .npz 파일로부터 ReferenceStats 복원."""
-    data = np.load(path, allow_pickle=False)
-    return ReferenceStats(
-        exercise=str(data["exercise"]),
-        feature_names=list(data["feature_names"]),
-        mean=data["mean"],
-        cov=data["cov"],
-        inv_cov=data["inv_cov"],
-        reference_distances=data["reference_distances"],
-    )
+    """
+    저장된 .npz 파일로부터 ReferenceStats 복원.
+
+    np.load()가 반환하는 NpzFile은 명시적으로 닫아주지 않으면 파일 핸들이 계속 열려있는
+    상태로 남는다. Linux에서는 대개 문제가 안 되지만, Windows에서는 이 상태에서 같은
+    경로에 save_reference()로 다시 저장하려 하면 파일 잠금 때문에 덮어쓰기가 온전히
+    안 되고, 다음 load_reference() 호출이 예전(stale) 내용을 읽어오는 문제가 실제로
+    발생했다. with 구문으로 반드시 닫아준다.
+    """
+    with np.load(path, allow_pickle=False) as data:
+        return ReferenceStats(
+            exercise=str(data["exercise"]),
+            feature_names=list(data["feature_names"]),
+            mean=data["mean"].copy(),
+            cov=data["cov"].copy(),
+            inv_cov=data["inv_cov"].copy(),
+            reference_distances=data["reference_distances"].copy(),
+        )

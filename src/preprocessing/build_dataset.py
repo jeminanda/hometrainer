@@ -143,11 +143,14 @@ def _interpolate_missing_frames(keypoints: np.ndarray, fallback_raw: np.ndarray 
 def process_source_file(
     source: SourceFile,
     target_length: int = 100,
-    min_distance: int = 15,
+    min_distance: int = 30,
     visibility_threshold: float = 0.5,
+    min_rep_frames: int = 30,
 ) -> tuple[list[dict], np.ndarray]:
     """
     키포인트 파일 하나를 실제 4개 모듈로 전처리해 (rep 인덱스 메타 리스트, 정규화된 rep 시퀀스 배열) 반환.
+
+    min_rep_frames: 이보다 짧은 rep은 과도 분절 조각으로 간주해 제외한다.
     """
     keypoints_raw = np.load(source.keypoints_path)  # (T, J, C), C=3이면 (x, y, visibility)
 
@@ -171,10 +174,16 @@ def process_source_file(
     # slice_repetitions는 (start_idx, end_idx) '인덱스 쌍' 리스트를 반환한다 (슬라이싱된 배열이 아님!)
     rep_index_pairs = slice_repetitions(primary_angle_series, min_distance=min_distance)
 
+    # 안전망: min_distance/min_prominence를 아무리 잘 튜닝해도, 최저점에서 잠깐 멈칫하는 동작
+    # 습관이 있는 영상은 여전히 과도 분절될 수 있다 (실측 사례: 202개로 분절된 영상 하나가
+    # 전체 데이터셋의 정상 사례 통계를 크게 왜곡시켰음). 진짜 rep이라면 최소 이 정도 프레임은
+    # 지속돼야 한다는 길이 기준으로 비정상적으로 짧은 조각을 한 번 더 걸러낸다.
+    rep_index_pairs = [(s, e) for s, e in rep_index_pairs if (e - s + 1) >= min_rep_frames]
+
     if len(rep_index_pairs) == 0:
         raise RuntimeError(
             f"{source.keypoints_path.name}: rep을 하나도 탐지하지 못했습니다 "
-            f"('{joint_name}'({reliable_side}) 각도 기준 극소점 부족)."
+            f"('{joint_name}'({reliable_side}) 각도 기준 극소점 부족, 또는 전부 min_rep_frames 미만으로 걸러짐)."
         )
 
     # 반환된 인덱스로 실제 키포인트 구간을 직접 슬라이싱
@@ -203,7 +212,8 @@ def build_dataset(
     output_dir: Path,
     manifest_path: Optional[Path] = None,
     target_length: int = 100,
-    min_distance: int = 15,
+    min_distance: int = 30,
+    min_rep_frames: int = 30,
 ) -> None:
     sources = load_manifest(manifest_path) if manifest_path else discover_source_files(raw_dir)
     print(f"처리 대상 파일 수: {len(sources)}")
@@ -215,7 +225,7 @@ def build_dataset(
     for source in sources:
         try:
             index_rows, rep_sequences = process_source_file(
-                source, target_length=target_length, min_distance=min_distance
+                source, target_length=target_length, min_distance=min_distance, min_rep_frames=min_rep_frames
             )
         except Exception as e:  # noqa: BLE001 - 한 파일 실패가 전체 빌드를 막지 않도록 함
             print(f"[FAIL] {source.keypoints_path.name}: {e}")
@@ -267,7 +277,8 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--manifest", type=Path, default=None)
     parser.add_argument("--target-length", type=int, default=100)
-    parser.add_argument("--min-distance", type=int, default=15, help="rep 사이 최소 프레임 간격")
+    parser.add_argument("--min-distance", type=int, default=30, help="rep 사이 최소 프레임 간격")
+    parser.add_argument("--min-rep-frames", type=int, default=30, help="이보다 짧은 rep은 과도 분절로 간주해 제외")
     args = parser.parse_args()
 
     build_dataset(
@@ -276,6 +287,7 @@ def main():
         manifest_path=args.manifest,
         target_length=args.target_length,
         min_distance=args.min_distance,
+        min_rep_frames=args.min_rep_frames,
     )
 
 

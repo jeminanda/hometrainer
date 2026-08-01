@@ -38,8 +38,28 @@ def train_for_exercise(processed_dir: Path, exercise: str, output_dir: Path) -> 
     if len(subset) == 0:
         raise ValueError(f"rep_features.csv에 exercise='{exercise}'인 rep이 없습니다.")
 
-    feature_names = [c for c in subset.columns if is_feature_column(c)]
+    candidate_names = [c for c in subset.columns if is_feature_column(c)]
+
+    # rep_features.csv에 여러 운동이 함께 저장돼 있으면, build_dataset이 운동별로
+    # 서로 다른 특징 컬럼(예: squat=*_knee, pushup=*_elbow)을 만들기 때문에
+    # 지금 exercise가 쓰지 않는 다른 운동의 컬럼은 이 subset 안에서 전부 NaN으로 채워진다.
+    # 그런 컬럼이 특징 행렬에 섞여 들어가면 mean/cov 계산 자체가 NaN으로 오염되므로 제외한다.
+    all_nan_columns = [c for c in candidate_names if subset[c].isna().all()]
+    if all_nan_columns:
+        print(
+            f"[정보] '{exercise}'에서 전부 NaN인 컬럼 {all_nan_columns}을(를) 특징에서 제외합니다 "
+            "(다른 운동 전용 컬럼이 rep_features.csv에 함께 저장돼 있는 경우 정상입니다)."
+        )
+    feature_names = [c for c in candidate_names if c not in all_nan_columns]
+
     feature_matrix = subset[feature_names].to_numpy()
+
+    if pd.isna(feature_matrix).any():
+        raise ValueError(
+            f"'{exercise}' 특징 행렬에 일부 NaN이 남아있습니다 (전부 NaN인 컬럼이 아니라 "
+            "일부 행만 NaN). 결측 처리가 안 된 rep이 섞여 있을 수 있으니 rep_features.csv를 확인하세요."
+        )
+
     print(f"'{exercise}' rep {len(subset)}개로 학습 시작, 특징 벡터 shape: {feature_matrix.shape}")
     print(f"특징: {feature_names}")
 
