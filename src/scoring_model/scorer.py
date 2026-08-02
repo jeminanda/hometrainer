@@ -112,9 +112,15 @@ def per_feature_contribution(feature_vector: np.ndarray, stats: ReferenceStats) 
     return dict(zip(stats.feature_names, z_scores.tolist()))
 
 
-def score_rep(feature_vector: np.ndarray, stats: ReferenceStats, top_k_feedback: int = 2) -> dict:
+def score_rep(
+    feature_vector: np.ndarray, stats: ReferenceStats, top_k_feedback: int = 2, decay_scale: float = 3.0
+) -> dict:
     """
     rep 1개를 채점하는 엔드투엔드 함수.
+
+    decay_scale: distance_to_score()에 그대로 전달됨. 새 영상의 특정 rep을 기준으로
+    calibrate_decay_scale()로 역산한 값을 넣으면, 그 rep이 원하는 점수가 나오도록
+    감쇠 속도를 조정할 수 있다 (score_video()에서 이걸 그대로 지원한다).
 
     Returns:
         {
@@ -125,7 +131,7 @@ def score_rep(feature_vector: np.ndarray, stats: ReferenceStats, top_k_feedback:
         }
     """
     distance = mahalanobis_distance(feature_vector, stats)
-    score = distance_to_score(distance, stats)
+    score = distance_to_score(distance, stats, decay_scale=decay_scale)
     contributions = per_feature_contribution(feature_vector, stats)
 
     top_issues = sorted(contributions.items(), key=lambda kv: abs(kv[1]), reverse=True)[:top_k_feedback]
