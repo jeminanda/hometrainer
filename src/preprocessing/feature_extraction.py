@@ -56,14 +56,27 @@ def compute_angle_series(rep_sequence: np.ndarray, joint_triplet: tuple[int, int
 
 
 def extract_rep_features(
-    rep_sequence: np.ndarray, exercise: str, n_dims: int = 2, visibility_channel: int = -1
+    rep_sequence: np.ndarray,
+    exercise: str,
+    n_dims: int = 2,
+    visibility_channel: int = -1,
+    num_phase_bins: int = 10,
 ) -> dict[str, float]:
     """
     rep 시퀀스 1개에서 exercise에 맞는 각도 기반 특징 딕셔너리를 추출.
     좌우 중 이 rep에서 visibility가 더 높은 쪽만 사용한다 (select_reliable_side).
 
-    반환 예 (pushup): {
+    min/max/rom(요약 통계) + 구간별(phase-bin) 평균 각도를 함께 반환한다.
+    min/max만 쓰면 "언제" 문제가 생겼는지는 알 수 없고(예: rep 전체 중 특정 구간에서만
+    잠깐 자세가 무너지는 경우), 그렇다고 시퀀스 전체(100프레임)를 그대로 특징으로 쓰면
+    표본 수(수백 개) 대비 차원이 너무 커져서 공분산 추정이 불가능해진다. 그래서 100프레임을
+    num_phase_bins(기본 10)개 구간으로 나눠 구간별 평균값만 특징으로 쓴다 — "관절 x가
+    rep의 몇 % 지점에서 이상했는지"를 scorer.py의 top_issues에서 그대로 읽을 수 있게 된다.
+    (아주 짧게 스쳐가는 이탈은 구간 평균에 묻힐 수 있어서, min/max는 안전망으로 계속 유지한다.)
+
+    반환 예 (pushup, num_phase_bins=10): {
         "min_angle_elbow": ..., "max_angle_elbow": ..., "rom_elbow": ...,
+        "elbow_bin00": ..., "elbow_bin01": ..., ..., "elbow_bin09": ...,
         "reliable_side_elbow": "left" 또는 "right" (특징 벡터에는 포함하지 않는 메타데이터 —
             build_dataset이 이 키를 감지해 rep_features.csv에 별도 컬럼으로만 남기고
             학습용 특징 행렬에서는 제외한다)
@@ -71,6 +84,9 @@ def extract_rep_features(
     """
     if exercise not in EXERCISE_JOINTS:
         raise ValueError(f"'{exercise}'에 대한 각도 정의가 EXERCISE_JOINTS(angles.py)에 없습니다.")
+
+    T = rep_sequence.shape[0]
+    bin_edges = np.linspace(0, T, num_phase_bins + 1, dtype=int)
 
     features: dict[str, float] = {}
     for joint_name, sides in EXERCISE_JOINTS[exercise].items():
@@ -81,13 +97,18 @@ def extract_rep_features(
         features[f"min_angle_{joint_name}"] = min_a
         features[f"max_angle_{joint_name}"] = max_a
         features[f"rom_{joint_name}"] = max_a - min_a
+
+        for b in range(num_phase_bins):
+            start, end = bin_edges[b], bin_edges[b + 1]
+            features[f"{joint_name}_bin{b:02d}"] = float(np.mean(series[start:end]))
+
         features[f"reliable_side_{joint_name}"] = reliable_side  # 메타데이터 (문자열 - 특징 행렬 제외 대상)
 
     return features
 
 
 def build_feature_matrix(
-    rep_sequences: np.ndarray, exercise: str, n_dims: int = 2
+    rep_sequences: np.ndarray, exercise: str, n_dims: int = 2, num_phase_bins: int = 10
 ) -> tuple[np.ndarray, list[str]]:
     """
     여러 rep 시퀀스 (N, target_length, J, C)를 한 번에 특징 행렬 (N, num_features)로 변환.
@@ -97,7 +118,10 @@ def build_feature_matrix(
         feature_matrix: (N, num_features)
         feature_names: 컬럼 순서에 대응하는 이름 리스트 (메타데이터 컬럼 제외)
     """
-    all_features = [extract_rep_features(rep_sequences[i], exercise, n_dims=n_dims) for i in range(rep_sequences.shape[0])]
+    all_features = [
+        extract_rep_features(rep_sequences[i], exercise, n_dims=n_dims, num_phase_bins=num_phase_bins)
+        for i in range(rep_sequences.shape[0])
+    ]
     feature_names = [k for k in all_features[0].keys() if not k.startswith("reliable_side_")]
     feature_matrix = np.array([[f[name] for name in feature_names] for f in all_features])
     return feature_matrix, feature_names

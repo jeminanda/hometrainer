@@ -19,6 +19,40 @@ def mahalanobis_distance(feature_vector: np.ndarray, stats: ReferenceStats) -> f
     return float(np.sqrt(diff @ stats.inv_cov @ diff))
 
 
+def calibrate_decay_scale(
+    distance: float, stats: ReferenceStats, target_score: float, inside_percentile: float = 95.0
+) -> float:
+    """
+    "이 정도로 벗어난 rep은 이 정도 점수였으면 좋겠다"를 그대로 넣으면 맞는 decay_scale을 역산.
+
+    예) 실제로 겪은 rep의 distance가 5.89였는데 그게 50점 정도였으면 좋겠다면:
+        decay_scale = calibrate_decay_scale(5.89, stats, target_score=50.0)
+    이렇게 구한 값을 이후 score_rep()/distance_to_score() 호출 시 decay_scale=... 로 넘기면 된다.
+
+    Args:
+        distance: 기준으로 삼을 실제 Mahalanobis distance (예: 예전에 0점 나왔던 그 rep의 distance)
+        stats: 그 rep을 채점할 때 썼던 것과 동일한 ReferenceStats
+        target_score: 그 distance에서 나왔으면 하는 목표 점수 (0~100, 100 미만이어야 함)
+        inside_percentile: distance_to_score와 동일한 값을 넣어야 한다 (기본 95)
+
+    Returns:
+        decay_scale (distance_to_score에 그대로 넘길 값)
+    """
+    if not (0 < target_score < 100):
+        raise ValueError("target_score는 0과 100 사이(100 미만)여야 합니다.")
+
+    threshold = float(np.percentile(stats.reference_distances, inside_percentile))
+    if distance <= threshold:
+        raise ValueError(
+            f"distance({distance})가 이미 임계값({threshold:.3f}) 이내라 감쇠 자체가 적용되지 않고 "
+            "무조건 100점입니다. decay_scale로 조절할 수 있는 구간이 아닙니다."
+        )
+
+    spread = float(np.std(stats.reference_distances)) + 1e-6
+    excess = (distance - threshold) / spread
+    return float(excess / np.log(100.0 / target_score))
+
+
 def distance_to_score(
     distance: float,
     stats: ReferenceStats,

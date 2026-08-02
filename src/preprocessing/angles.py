@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import numpy as np
 
 def calculate_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
@@ -33,9 +34,32 @@ EXERCISE_JOINTS = {
         },
     },
     "pushup": {
+        # elbow가 항상 첫 번째로 남아있어야 함: build_dataset.py의 rep 경계 탐지가
+        # EXERCISE_JOINTS[exercise]의 "첫 번째 관절"을 기준으로 삼기 때문
+        # (팔굽혀펴기는 팔꿈치 각도가 반복 동작의 저점/정점을 가장 뚜렷하게 나타냄).
         "elbow": {
             "left": (LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST),
             "right": (RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST),
+        },
+        # 허리(엉덩이가 처지거나 솟는 정도): 어깨-엉덩이-발목이 일직선(180도에 가까움)이어야
+        # 정상 폼. 엉덩이가 아래로 처지든 위로 솟든 이 각도가 180도에서 멀어진다
+        # (다만 부호가 없는 각도라 "처짐"과 "솟음"을 방향까지 구분하지는 못하고,
+        # "몸통이 일직선에서 벗어났다"는 정도만 잡는다).
+        "hip": {
+            "left": (LEFT_SHOULDER, LEFT_HIP, LEFT_ANKLE),
+            "right": (RIGHT_SHOULDER, RIGHT_HIP, RIGHT_ANKLE),
+        },
+        # 다리(무릎이 굽혀지는 정도): 엉덩이-무릎-발목. 무릎을 굽히거나 바닥에 대는 등
+        # 다리가 일자로 안 펴지는 자세를 잡아낸다.
+        "knee": {
+            "left": (LEFT_HIP, LEFT_KNEE, LEFT_ANKLE),
+            "right": (RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE),
+        },
+        # 어깨(팔꿈치가 몸통에서 벌어지는 정도): 팔꿈치-어깨-엉덩이. 팔꿈치가 과도하게
+        # 벌어지거나(flare) 반대로 너무 몸에 붙는 자세를 잡아낸다.
+        "shoulder": {
+            "left": (LEFT_ELBOW, LEFT_SHOULDER, LEFT_HIP),
+            "right": (RIGHT_ELBOW, RIGHT_SHOULDER, RIGHT_HIP),
         },
     },
 }
