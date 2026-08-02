@@ -74,6 +74,7 @@ class ExtractionConfig:
     target_fps: Optional[int] = None       # None이면 원본 fps 그대로 사용, 지정 시 프레임 샘플링
     include_z: bool = False                # True면 (x, y, z, visibility), False면 (x, y, visibility)
     min_detected_ratio: float = 0.1        # 이 비율보다 검출률이 낮으면 PoseNotDetectedError
+    use_gpu: bool = False                  # True면 GPU delegate 사용 (지원 안 되는 환경에선 CPU로 자동 대체)
 
 
 @dataclasses.dataclass
@@ -128,16 +129,37 @@ class BlazePoseExtractor:
                 "에서 .task 파일을 받아 config.model_path에 지정하세요."
             )
 
-        options = PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(model_path)),
-            running_mode=running_mode,
-            num_poses=self.config.num_poses,
-            min_pose_detection_confidence=self.config.min_pose_detection_confidence,
-            min_pose_presence_confidence=self.config.min_pose_presence_confidence,
-            min_tracking_confidence=self.config.min_tracking_confidence,
-            output_segmentation_masks=self.config.output_segmentation_masks,
-        )
-        self._landmarker = PoseLandmarker.create_from_options(options)
+        delegate = BaseOptions.Delegate.GPU if self.config.use_gpu else BaseOptions.Delegate.CPU
+
+        try:
+            options = PoseLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=str(model_path), delegate=delegate),
+                running_mode=running_mode,
+                num_poses=self.config.num_poses,
+                min_pose_detection_confidence=self.config.min_pose_detection_confidence,
+                min_pose_presence_confidence=self.config.min_pose_presence_confidence,
+                min_tracking_confidence=self.config.min_tracking_confidence,
+                output_segmentation_masks=self.config.output_segmentation_masks,
+            )
+            self._landmarker = PoseLandmarker.create_from_options(options)
+        except Exception as e:
+            if self.config.use_gpu:
+                # 일부 환경(특히 Windows)에서는 mediapipe Tasks API의 GPU delegate가
+                # 아직 완전히 지원되지 않을 수 있다. GPU 초기화가 실패하면 조용히 넘어가지
+                # 않고 CPU로 자동 폴백하되, 사용자가 알 수 있게 경고를 남긴다.
+                print(f"[경고] GPU delegate 초기화 실패({e}) -> CPU로 대체합니다.")
+                options = PoseLandmarkerOptions(
+                    base_options=BaseOptions(model_asset_path=str(model_path), delegate=BaseOptions.Delegate.CPU),
+                    running_mode=running_mode,
+                    num_poses=self.config.num_poses,
+                    min_pose_detection_confidence=self.config.min_pose_detection_confidence,
+                    min_pose_presence_confidence=self.config.min_pose_presence_confidence,
+                    min_tracking_confidence=self.config.min_tracking_confidence,
+                    output_segmentation_masks=self.config.output_segmentation_masks,
+                )
+                self._landmarker = PoseLandmarker.create_from_options(options)
+            else:
+                raise
 
     # ---- 공개 API ----
 
