@@ -8,6 +8,11 @@ preprocessing이 만든 data/processed/rep_features.csv(각도 특징이 이미 
 preprocessing으로 옮겨가면서 build_dataset 단계에서 이미 계산해둔 rep_features.csv를
 그대로 쓰도록 변경 — 중복 계산 제거)
 
+(영상별 중앙값 대비 편차 특징(normalization.py)을 검토했었지만, 실제 데이터로 원인을
+까본 결과 distance가 뭉치는 원인이 "사람 간 체형 차이"가 아니라 카메라 각도 문제/템포
+차이로 확인되어 롤백함 — 프로젝트에는 적용하지 않기로 함. 필요성이 다시 제기되면
+normalization.py의 add_within_group_deviation을 그때 다시 연결하면 된다.)
+
 사용 예:
     python -m src.scoring_model.train \\
         --processed-dir data/processed --exercise pushup --output-dir models
@@ -34,7 +39,7 @@ def is_feature_column(col: str) -> bool:
 def train_for_exercise(processed_dir: Path, exercise: str, output_dir: Path) -> None:
     rep_features_df = pd.read_csv(processed_dir / "rep_features.csv")
 
-    subset = rep_features_df[rep_features_df["exercise"] == exercise]
+    subset = rep_features_df[rep_features_df["exercise"] == exercise].reset_index(drop=True)
     if len(subset) == 0:
         raise ValueError(f"rep_features.csv에 exercise='{exercise}'인 rep이 없습니다.")
 

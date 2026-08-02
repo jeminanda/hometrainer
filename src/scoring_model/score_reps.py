@@ -22,11 +22,60 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ..preprocessing.build_dataset import SourceFile, process_source_file_with_template
 from ..preprocessing.feature_extraction import extract_rep_features
 from .reference_stats import load_reference
 from .scorer import score_rep
 
 META_COLUMNS = {"video_id", "exercise", "rep_idx", "seq_index"}
+
+
+def load_template(processed_dir: Path, exercise: str) -> np.ndarray:
+    """
+    build_dataset()이 저장해둔 templates.npz에서 exercise의 DTW 템플릿을 불러온다.
+    채점 시에는 반드시 학습 때 쓴 것과 동일한 템플릿을 재사용해야 한다 — 새로
+    템플릿을 만들면 학습/채점 기준이 어긋난다.
+    """
+    with np.load(Path(processed_dir) / "templates.npz") as data:
+        if exercise not in data:
+            raise KeyError(f"templates.npz에 '{exercise}' 템플릿이 없습니다. 사용 가능: {list(data.keys())}")
+        return data[exercise].copy()
+
+
+def score_video(
+    keypoints_path: Path,
+    exercise: str,
+    template: np.ndarray,
+    model_dir: Path,
+    video_id: str | None = None,
+    min_distance: int = 30,
+    min_rep_frames: int = 30,
+) -> list[dict]:
+    """
+    새 영상 1개(키포인트 .npy)를 템플릿으로 DTW 위상정규화 + 특징추출 + 채점까지 한 번에 처리.
+    (build_dataset의 process_source_file_with_template + scorer.score_rep을 이어붙인 것)
+
+    Returns:
+        rep마다 {video_id, exercise, rep_idx, ...특징들..., score, distance, feature_contributions, top_issues}
+    """
+    keypoints_path = Path(keypoints_path)
+    source = SourceFile(
+        video_id=video_id or keypoints_path.stem,
+        exercise=exercise,
+        keypoints_path=keypoints_path,
+    )
+    index_rows, _ = process_source_file_with_template(
+        source, template, min_distance=min_distance, min_rep_frames=min_rep_frames
+    )
+
+    stats = load_reference(Path(model_dir) / f"{exercise}_reference.npz")
+
+    results = []
+    for row in index_rows:
+        feature_vector = np.array([row[name] for name in stats.feature_names])
+        score_result = score_rep(feature_vector, stats)
+        results.append({**row, **score_result})
+    return results
 
 
 def score_rep_sequence(rep_sequence: np.ndarray, exercise: str, model_dir: Path) -> dict:

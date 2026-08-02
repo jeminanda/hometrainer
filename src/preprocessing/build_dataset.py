@@ -5,9 +5,16 @@ data/raw/ 의 pose_extraction 결과(키포인트 .npy)를 모두 순회하며
 - coordiante_normalization.normalize_landmarks
 - angles.select_reliable_side (좌우 중 visibility 높은 쪽 선택) + calculate_angle
 - rep_slicer.slice_repetitions       (주의: (start_idx, end_idx) 인덱스 쌍을 반환함)
-- phase_normalization.normalize_phase
+- phase_normalization.build_template + normalize_phase_dtw  (DTW 기반 위상 정규화)
 - feature_extraction.extract_rep_features
 만을 사용해 전처리를 완료하고, 결과를 data/processed/ 에 저장한다.
+
+DTW 도입으로 2-패스 구조가 됐다 (기존 선형보간 방식은 파일 하나만 보고 그 자리에서
+끝낼 수 있었지만, DTW는 "모범 사례 평균 궤적(템플릿)"이 먼저 있어야 하고, 그 템플릿은
+전체 rep을 한 번 다 봐야 만들 수 있다):
+    1패스: 모든 파일에서 rep 구간(가변 길이)까지만 뽑아 전부 모은다 (위상 정규화 전)
+    -> exercise별로 템플릿(평균 각도 궤적) 생성
+    2패스: 모아둔 각 rep을 해당 exercise의 템플릿에 DTW로 맞춰 위상 정규화 + 특징 추출
 
 입력 파일 규칙 (기본):
     data/raw/{exercise}_{video_id}_keypoints.npy
@@ -15,9 +22,10 @@ data/raw/ 의 pose_extraction 결과(키포인트 .npy)를 모두 순회하며
     규칙에 안 맞으면 --manifest 로 (video_id, keypoints_path, exercise) csv 지정 가능.
 
 출력 (data/processed/):
-    - rep_sequences.npy : (전체 rep 수, target_length, J, C) 정규화된 rep 시퀀스
+    - rep_sequences.npy : (전체 rep 수, target_length, J, C) DTW로 위상 정규화된 rep 시퀀스
     - rep_features.csv  : rep_sequences.npy의 각 행이 어느 (video_id, exercise, rep_idx)인지 매핑 +
                           feature_extraction이 계산한 각도 특징(min/max/rom) + reliable_side 메타데이터
+    - templates.npz     : exercise별 DTW 템플릿 (참고/디버깅용으로 함께 저장)
     - build_log.json    : 성공/실패 로그
 """
 
@@ -40,7 +48,7 @@ except ImportError:  # pragma: no cover
 from .angles import EXERCISE_JOINTS, calculate_angle, select_reliable_side
 from .coordiante_normalization import normalize_landmarks  # 파일명 오타(coordiante) 그대로 유지
 from .feature_extraction import extract_rep_features
-from .phase_normalization import normalize_phase
+from .phase_normalization import build_template, normalize_phase_dtw
 from .rep_slicer import slice_repetitions
 
 
@@ -137,20 +145,28 @@ def _interpolate_missing_frames(keypoints: np.ndarray, fallback_raw: np.ndarray 
 
 
 # -----------------------------
-# 단일 파일 처리
+# 1패스: rep 구간(가변 길이)까지만 추출
 # -----------------------------
 
-def process_source_file(
+@dataclasses.dataclass
+class RawRepSegment:
+    """위상 정규화 전, 가변 길이 그대로의 rep 하나."""
+    video_id: str
+    exercise: str
+    rep_idx: int
+    keypoints: np.ndarray       # (T_rep, J, C), 가변 길이
+    angle_series: np.ndarray    # (T_rep,), rep_slicer가 쓴 것과 동일한 대표 각도 시계열
+
+
+def extract_rep_segments(
     source: SourceFile,
-    target_length: int = 100,
     min_distance: int = 30,
     visibility_threshold: float = 0.5,
     min_rep_frames: int = 30,
-) -> tuple[list[dict], np.ndarray]:
+) -> list[RawRepSegment]:
     """
-    키포인트 파일 하나를 실제 4개 모듈로 전처리해 (rep 인덱스 메타 리스트, 정규화된 rep 시퀀스 배열) 반환.
-
-    min_rep_frames: 이보다 짧은 rep은 과도 분절 조각으로 간주해 제외한다.
+    키포인트 파일 하나를 마스킹/보간 -> 정규화 -> 신뢰도 높은 쪽 선택 -> rep 슬라이싱까지
+    처리해서, 위상 정규화 전(가변 길이) rep 목록을 반환한다.
     """
     keypoints_raw = np.load(source.keypoints_path)  # (T, J, C), C=3이면 (x, y, visibility)
 
@@ -175,8 +191,7 @@ def process_source_file(
     rep_index_pairs = slice_repetitions(primary_angle_series, min_distance=min_distance)
 
     # 안전망: min_distance/min_prominence를 아무리 잘 튜닝해도, 최저점에서 잠깐 멈칫하는 동작
-    # 습관이 있는 영상은 여전히 과도 분절될 수 있다 (실측 사례: 202개로 분절된 영상 하나가
-    # 전체 데이터셋의 정상 사례 통계를 크게 왜곡시켰음). 진짜 rep이라면 최소 이 정도 프레임은
+    # 습관이 있는 영상은 여전히 과도 분절될 수 있다. 진짜 rep이라면 최소 이 정도 프레임은
     # 지속돼야 한다는 길이 기준으로 비정상적으로 짧은 조각을 한 번 더 걸러낸다.
     rep_index_pairs = [(s, e) for s, e in rep_index_pairs if (e - s + 1) >= min_rep_frames]
 
@@ -186,25 +201,56 @@ def process_source_file(
             f"('{joint_name}'({reliable_side}) 각도 기준 극소점 부족, 또는 전부 min_rep_frames 미만으로 걸러짐)."
         )
 
-    # 반환된 인덱스로 실제 키포인트 구간을 직접 슬라이싱
-    rep_keypoints_list = [normalized[start:end + 1] for start, end in rep_index_pairs]
-
-    rep_sequences = np.stack(
-        [normalize_phase(rk, target_length=target_length) for rk in rep_keypoints_list], axis=0
-    )  # (num_reps, target_length, J, C)
-
-    # rep마다 채점 모델(scoring_model)이 바로 쓸 특징(min/max/rom/좌우대칭)도 함께 계산해둔다.
-    index_rows = []
-    for rep_idx in range(len(rep_keypoints_list)):
-        row = {"video_id": source.video_id, "exercise": source.exercise, "rep_idx": rep_idx}
-        row.update(extract_rep_features(rep_sequences[rep_idx], source.exercise))
-        index_rows.append(row)
-
-    return index_rows, rep_sequences
+    return [
+        RawRepSegment(
+            video_id=source.video_id,
+            exercise=source.exercise,
+            rep_idx=rep_idx,
+            keypoints=normalized[start:end + 1],
+            angle_series=primary_angle_series[start:end + 1],
+        )
+        for rep_idx, (start, end) in enumerate(rep_index_pairs)
+    ]
 
 
 # -----------------------------
-# 전체 데이터셋 빌드
+# 새 영상 1개 처리 (채점 시 사용 - 저장된 템플릿 재사용)
+# -----------------------------
+
+def process_source_file_with_template(
+    source: SourceFile,
+    template: np.ndarray,
+    min_distance: int = 30,
+    visibility_threshold: float = 0.5,
+    min_rep_frames: int = 30,
+) -> tuple[list[dict], np.ndarray]:
+    """
+    build_dataset()으로 미리 만들어 저장해둔 templates.npz의 템플릿을 그대로 받아,
+    새 영상 1개를 DTW로 위상 정규화 + 특징 추출까지 처리한다. (채점 시점에는 기준
+    데이터셋 전체로 템플릿을 다시 만들 필요 없이, 학습 때 쓴 템플릿을 그대로 재사용해야
+    학습/채점 기준이 일치한다.)
+
+    Returns:
+        (index_rows, rep_sequences) - 기존 process_source_file()과 동일한 반환 형태
+    """
+    segments = extract_rep_segments(
+        source, min_distance=min_distance, visibility_threshold=visibility_threshold, min_rep_frames=min_rep_frames
+    )
+
+    index_rows = []
+    rep_sequences = []
+    for seg in segments:
+        rep_sequence = normalize_phase_dtw(seg.keypoints, seg.angle_series, template)
+        row = {"video_id": seg.video_id, "exercise": seg.exercise, "rep_idx": seg.rep_idx}
+        row.update(extract_rep_features(rep_sequence, seg.exercise))
+        index_rows.append(row)
+        rep_sequences.append(rep_sequence)
+
+    return index_rows, np.stack(rep_sequences, axis=0)
+
+
+# -----------------------------
+# 전체 데이터셋 빌드 (2패스)
 # -----------------------------
 
 def build_dataset(
@@ -218,32 +264,55 @@ def build_dataset(
     sources = load_manifest(manifest_path) if manifest_path else discover_source_files(raw_dir)
     print(f"처리 대상 파일 수: {len(sources)}")
 
-    all_index_rows: list[dict] = []
-    all_sequences: list[np.ndarray] = []
+    # ---- 1패스: 위상 정규화 전 rep 구간 전부 모으기 ----
+    all_segments: list[RawRepSegment] = []
     log = {"success": [], "failed": []}
 
     for source in sources:
         try:
-            index_rows, rep_sequences = process_source_file(
-                source, target_length=target_length, min_distance=min_distance, min_rep_frames=min_rep_frames
+            segments = extract_rep_segments(
+                source, min_distance=min_distance, min_rep_frames=min_rep_frames
             )
         except Exception as e:  # noqa: BLE001 - 한 파일 실패가 전체 빌드를 막지 않도록 함
             print(f"[FAIL] {source.keypoints_path.name}: {e}")
             log["failed"].append({"file": str(source.keypoints_path), "reason": str(e)})
             continue
 
-        all_index_rows.extend(index_rows)
-        all_sequences.append(rep_sequences)
-        log["success"].append({"file": str(source.keypoints_path), "num_reps": len(index_rows)})
-        print(f"[OK] {source.keypoints_path.name}: rep {len(index_rows)}개 처리 완료")
+        all_segments.extend(segments)
+        log["success"].append({"file": str(source.keypoints_path), "num_reps": len(segments)})
+        print(f"[OK] {source.keypoints_path.name}: rep {len(segments)}개 구간 추출 완료")
 
-    if not all_index_rows:
+    if not all_segments:
         raise RuntimeError("성공적으로 처리된 파일이 없습니다. build_log.json을 확인하세요.")
+
+    # ---- exercise별 DTW 템플릿 생성 (지금 모은 모범 사례들의 평균 궤적) ----
+    exercises = sorted({seg.exercise for seg in all_segments})
+    templates: dict[str, np.ndarray] = {}
+    for exercise in exercises:
+        angle_lists = [seg.angle_series for seg in all_segments if seg.exercise == exercise]
+        templates[exercise] = build_template(angle_lists, target_length=target_length)
+        print(f"[템플릿] '{exercise}': rep {len(angle_lists)}개 평균으로 템플릿 생성")
+
+    # ---- 2패스: DTW 위상 정규화 + 특징 추출 ----
+    all_index_rows: list[dict] = []
+    all_sequences: list[np.ndarray] = []
+
+    for seg in all_segments:
+        template = templates[seg.exercise]
+        rep_sequence = normalize_phase_dtw(seg.keypoints, seg.angle_series, template)
+
+        row = {"video_id": seg.video_id, "exercise": seg.exercise, "rep_idx": seg.rep_idx}
+        row.update(extract_rep_features(rep_sequence, seg.exercise))
+
+        all_index_rows.append(row)
+        all_sequences.append(rep_sequence)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rep_sequences_all = np.concatenate(all_sequences, axis=0)  # (N_reps_total, target_length, J, C)
+    rep_sequences_all = np.stack(all_sequences, axis=0)  # (N_reps_total, target_length, J, C)
     np.save(output_dir / "rep_sequences.npy", rep_sequences_all)
+
+    np.savez(output_dir / "templates.npz", **templates)
 
     for i, row in enumerate(all_index_rows):
         row["seq_index"] = i
@@ -271,7 +340,7 @@ def build_dataset(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="angles/coordiante_normalization/rep_slicer/phase_normalization으로 data/processed 생성"
+        description="angles/coordiante_normalization/rep_slicer/phase_normalization(DTW)으로 data/processed 생성"
     )
     parser.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
     parser.add_argument("--output-dir", type=Path, default=Path("data/processed"))
