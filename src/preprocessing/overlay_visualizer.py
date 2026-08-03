@@ -27,6 +27,11 @@ try:
 except ImportError:  # pragma: no cover
     cv2 = None
 
+try:
+    import imageio.v2 as imageio
+except ImportError:  # pragma: no cover
+    imageio = None
+
 from .visualizer import CONNECTION_GROUPS
 
 # matplotlib 색상 이름(visualizer.py 기준) -> OpenCV가 쓰는 BGR 튜플로 변환
@@ -41,6 +46,53 @@ _COLOR_NAME_TO_BGR = {
 _JOINT_COLOR_BGR = (255, 0, 200)  # purple 계열
 
 
+def _draw_overlay_frame(
+    frame: np.ndarray,
+    lm: np.ndarray,
+    frame_width: int,
+    frame_height: int,
+    visibility_channel: int,
+    visibility_threshold: float,
+    joint_radius: int,
+    line_thickness: int,
+) -> np.ndarray:
+    """프레임 1장(BGR) 위에 keypoints 1프레임분(lm)을 그려서 반환."""
+    vis = lm[:, visibility_channel] if lm.shape[-1] > 2 else np.ones(lm.shape[0])
+    px = lm[:, 0] * frame_width
+    py = lm[:, 1] * frame_height
+
+    def _point(idx: int):
+        if np.isnan(px[idx]) or np.isnan(py[idx]):
+            return None
+        return (int(px[idx]), int(py[idx]))
+
+    def _alpha_for(idx_a: int, idx_b: int) -> float:
+        v = min(vis[idx_a], vis[idx_b]) if not (np.isnan(vis[idx_a]) or np.isnan(vis[idx_b])) else 0.0
+        return float(np.clip(v, 0.15, 1.0)) if v < visibility_threshold else 1.0
+
+    overlay = frame.copy()
+    for connections, color_name, _lw, _label in CONNECTION_GROUPS:
+        color = _COLOR_NAME_TO_BGR.get(color_name, (255, 255, 255))
+        for a_idx, b_idx in connections:
+            pa, pb = _point(a_idx), _point(b_idx)
+            if pa is None or pb is None:
+                continue
+            alpha = _alpha_for(a_idx, b_idx)
+            line_color = tuple(int(c * alpha) for c in color)
+            cv2.line(overlay, pa, pb, line_color, line_thickness, lineType=cv2.LINE_AA)
+
+    for idx in range(lm.shape[0]):
+        p = _point(idx)
+        if p is None:
+            continue
+        v = vis[idx] if not np.isnan(vis[idx]) else 0.0
+        alpha = float(np.clip(v, 0.15, 1.0)) if v < visibility_threshold else 1.0
+        joint_color = tuple(int(c * alpha) for c in _JOINT_COLOR_BGR)
+        cv2.circle(overlay, p, joint_radius, joint_color, -1, lineType=cv2.LINE_AA)
+
+    return overlay
+
+
 def overlay_skeleton_on_video(
     video_path: str | Path,
     keypoints_path: str | Path,
@@ -49,6 +101,9 @@ def overlay_skeleton_on_video(
     visibility_threshold: float = 0.3,
     joint_radius: int = 4,
     line_thickness: int = 2,
+    output_format: str = "mp4",
+    gif_fps: float = 12.0,
+    gif_max_width: int = 480,
 ) -> Path:
     """
     원본 영상(video_path) 위에 keypoints_path(.npy, BlazePoseExtractor 원본 출력)의
@@ -58,7 +113,8 @@ def overlay_skeleton_on_video(
         video_path: 원본 영상 경로 (data/raw든 tests든 아무 위치나 가능)
         keypoints_path: 그 영상에서 뽑은 원본 keypoints .npy (정규화 이미지 좌표,
             정규화/DTW를 거치지 않은 것)
-        output_path: 오버레이 결과를 저장할 mp4 경로
+        output_path: 오버레이 결과를 저장할 경로 (확장자는 output_format과 무관하게
+            무시되고, output_format에 맞는 확장자로 자동 교체된다)
         visibility_channel: visibility가 들어있는 채널 (-1이면 마지막 채널,
             (x,y,visibility) 3채널이든 (x,y,z,visibility) 4채널이든 안전하게 동작)
         visibility_threshold: 이 값보다 낮은 관절은 흐릿하게/생략해서 그림
@@ -66,16 +122,28 @@ def overlay_skeleton_on_video(
             보여주는 게 시연에서는 더 정직하다고 판단해, 아예 안 그리기보다는
             흐리게 그리는 쪽을 기본으로 한다 - draw_low_visibility 참고)
         joint_radius, line_thickness: 그리기 스타일
+        output_format: "mp4"(기본, 노트북 안에서 매끄럽게 재생) 또는
+            "gif"(README/슬라이드용 — GitHub README는 mp4를 인라인 재생 못 하지만
+            gif는 자동 재생된다). gif는 색상 제한(256색)과 큰 파일 크기 문제가 있어서,
+            gif_fps/gif_max_width로 자동으로 프레임과 해상도를 줄인다.
+        gif_fps: output_format="gif"일 때만 사용. 원본 fps 그대로 gif로 만들면
+            파일이 너무 커지므로, 이 fps에 맞춰 프레임을 솎아낸다.
+        gif_max_width: output_format="gif"일 때만 사용. 이 너비보다 크면 비율을
+            유지한 채 축소한다 (원본보다 크게 키우지는 않음).
 
     Returns:
-        저장된 output_path (Path 객체)
+        저장된 output_path (실제로 쓰인 확장자로 교체된 Path 객체)
     """
     if cv2 is None:
         raise ImportError("opencv-python이 필요합니다. `pip install opencv-python`")
+    if output_format not in ("mp4", "gif"):
+        raise ValueError(f"output_format은 'mp4' 또는 'gif'여야 합니다: {output_format}")
+    if output_format == "gif" and imageio is None:
+        raise ImportError("gif 저장에는 imageio가 필요합니다. `pip install imageio`")
 
     video_path = Path(video_path)
     keypoints_path = Path(keypoints_path)
-    output_path = Path(output_path)
+    output_path = Path(output_path).with_suffix(f".{output_format}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     keypoints = np.load(keypoints_path)  # (T, 33, C), 원본 정규화 이미지 좌표(0~1)
@@ -97,52 +165,50 @@ def overlay_skeleton_on_video(
             "(추출 시 target_fps로 샘플링했다면 원래 있을 수 있는 차이입니다)."
         )
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (frame_width, frame_height))
+    # gif는 원본 fps 그대로 쓰면 파일이 커지므로, gif_fps에 맞춰 몇 프레임마다 하나씩만 쓸지 결정
+    frame_stride = max(1, round(fps / gif_fps)) if output_format == "gif" else 1
+
+    resize_to = None
+    if output_format == "gif" and frame_width > gif_max_width:
+        scale = gif_max_width / frame_width
+        resize_to = (gif_max_width, int(frame_height * scale))
+
+    writer = None
+    gif_frames: list[np.ndarray] = []
+    if output_format == "mp4":
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(output_path), fourcc, fps, (frame_width, frame_height))
 
     for frame_idx in range(num_frames):
         ok, frame = cap.read()
         if not ok:
             break
+        if output_format == "gif" and frame_idx % frame_stride != 0:
+            continue
 
-        lm = keypoints[frame_idx]  # (33, C)
-        vis = lm[:, visibility_channel] if lm.shape[-1] > 2 else np.ones(lm.shape[0])
-        px = lm[:, 0] * frame_width
-        py = lm[:, 1] * frame_height
+        overlay = _draw_overlay_frame(
+            frame, keypoints[frame_idx], frame_width, frame_height,
+            visibility_channel, visibility_threshold, joint_radius, line_thickness,
+        )
 
-        def _point(idx: int):
-            if np.isnan(px[idx]) or np.isnan(py[idx]):
-                return None
-            return (int(px[idx]), int(py[idx]))
-
-        def _alpha_for(idx_a: int, idx_b: int) -> float:
-            v = min(vis[idx_a], vis[idx_b]) if not (np.isnan(vis[idx_a]) or np.isnan(vis[idx_b])) else 0.0
-            return float(np.clip(v, 0.15, 1.0)) if v < visibility_threshold else 1.0
-
-        overlay = frame.copy()
-        for connections, color_name, _lw, _label in CONNECTION_GROUPS:
-            color = _COLOR_NAME_TO_BGR.get(color_name, (255, 255, 255))
-            for a_idx, b_idx in connections:
-                pa, pb = _point(a_idx), _point(b_idx)
-                if pa is None or pb is None:
-                    continue
-                alpha = _alpha_for(a_idx, b_idx)
-                line_color = tuple(int(c * alpha) for c in color)
-                cv2.line(overlay, pa, pb, line_color, line_thickness, lineType=cv2.LINE_AA)
-
-        for idx in range(lm.shape[0]):
-            p = _point(idx)
-            if p is None:
-                continue
-            v = vis[idx] if not np.isnan(vis[idx]) else 0.0
-            alpha = float(np.clip(v, 0.15, 1.0)) if v < visibility_threshold else 1.0
-            joint_color = tuple(int(c * alpha) for c in _JOINT_COLOR_BGR)
-            cv2.circle(overlay, p, joint_radius, joint_color, -1, lineType=cv2.LINE_AA)
-
-        writer.write(overlay)
+        if output_format == "mp4":
+            writer.write(overlay)
+        else:
+            if resize_to is not None:
+                overlay = cv2.resize(overlay, resize_to, interpolation=cv2.INTER_AREA)
+            gif_frames.append(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))  # imageio는 RGB 순서
 
     cap.release()
-    writer.release()
+    if output_format == "mp4":
+        writer.release()
+        print(f"오버레이 영상(mp4) 저장 완료: {output_path} ({num_frames}프레임)")
+    else:
+        imageio.mimsave(output_path, gif_frames, fps=gif_fps)
+        print(
+            f"오버레이 gif 저장 완료: {output_path} "
+            f"({len(gif_frames)}프레임, {gif_fps}fps"
+            + (f", 너비 {resize_to[0]}px로 축소" if resize_to else "")
+            + ")"
+        )
 
-    print(f"오버레이 영상 저장 완료: {output_path} ({num_frames}프레임)")
     return output_path

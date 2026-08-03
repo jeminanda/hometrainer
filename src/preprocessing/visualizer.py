@@ -83,10 +83,26 @@ def animate_skeleton_2d(
     """
     N_frames = landmarks_sequence.shape[0]
 
+    # X, Y 축 범위 계산 (Inf 방어)
+    # np.nanmin/nanmax는 NaN은 무시하지만 Inf는 무시하지 않는다. coordiante_normalization의
+    # 스케일 정규화(몸통 길이로 나눔)에서 스케일이 0에 가까우면 나눗셈 결과가 Inf가 될 수 있는데,
+    # 이 경우 NaN만 마스킹/보간으로 처리해도 여전히 Inf가 남아 축 범위 계산이 깨진다.
+    # 그래서 Inf도 NaN과 동일하게 "값 없음"으로 취급해 무시한다.
+    xy = landmarks_sequence[:, :, :2].astype(float)
+    finite_mask = np.isfinite(xy)
+    if not finite_mask.any():
+        raise ValueError(
+            "landmarks_sequence에 유효한(NaN/Inf가 아닌) 좌표가 하나도 없습니다. "
+            "정규화 전에 마스킹/보간이 제대로 됐는지, 스케일이 0으로 나뉘지 않았는지 확인하세요."
+        )
+    xy_clean = np.where(finite_mask, xy, np.nan)  # Inf -> NaN으로 통일해 nanmin/nanmax가 무시하게 함
+
+    x_min, x_max = np.nanmin(xy_clean[:, :, 0]), np.nanmax(xy_clean[:, :, 0])
+    y_min, y_max = np.nanmin(xy_clean[:, :, 1]), np.nanmax(xy_clean[:, :, 1])
+
     # 1. Figure 및 2D Axes 초기화
     fig, ax = plt.subplots(figsize=(7, 7))
     plt.axis('equal')
-
     ax.set_title(title, fontsize=14, fontweight="bold")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
@@ -94,16 +110,6 @@ def animate_skeleton_2d(
 
     # MediaPipe Y축 보정 (이미지 좌표계 특성상 Y축이 아래로 증가하므로 반전)
     ax.invert_yaxis()
-
-    # X, Y 축 범위 자동 설정 (여백 포함)
-    x_min, x_max = (
-        np.nanmin(landmarks_sequence[:, :, 0]),
-        np.nanmax(landmarks_sequence[:, :, 0]),
-    )
-    y_min, y_max = (
-        np.nanmin(landmarks_sequence[:, :, 1]),
-        np.nanmax(landmarks_sequence[:, :, 1]),
-    )
 
     x_margin = (x_max - x_min) * 0.15 if (x_max - x_min) > 0 else 0.5
     y_margin = (y_max - y_min) * 0.15 if (y_max - y_min) > 0 else 0.5
@@ -147,8 +153,8 @@ def animate_skeleton_2d(
     def update(frame_idx):
         frame_landmarks = landmarks_sequence[frame_idx]
 
-        xs = frame_landmarks[:, 0]
-        ys = frame_landmarks[:, 1]
+        xs = np.where(np.isfinite(frame_landmarks[:, 0]), frame_landmarks[:, 0], np.nan)
+        ys = np.where(np.isfinite(frame_landmarks[:, 1]), frame_landmarks[:, 1], np.nan)
 
         updated_elements = []
 

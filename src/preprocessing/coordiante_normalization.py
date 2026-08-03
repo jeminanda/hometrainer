@@ -33,7 +33,20 @@ def normalize_landmarks(landmarks: np.ndarray, n_spatial_dims: int = 2) -> np.nd
 
     # 프레임별로 따로 나누지 않고, 시퀀스 전체의 대표값(중앙값) 하나로 고정
     # -> 애니메이션 재생 중 사람 크기가 프레임마다 출렁이는 것을 방지
-    reference_scale = np.median(torso_length)
+    #
+    # np.median이 아니라 np.nanmedian을 쓴다: 특정 프레임에서 어깨/힙이 끝내 NaN으로
+    # 남으면(마스킹/보간으로도 못 채운 경우) 그 프레임의 torso_length도 NaN이 되는데,
+    # np.median은 배열에 NaN이 단 하나만 있어도 전체 결과가 NaN이 되어버려서, 그 NaN 하나가
+    # 시퀀스 전체 스케일(reference_scale)을 오염시키고, 그 결과 모든 프레임/모든 관절 좌표가
+    # NaN으로 나뉘어 전부 무효화되는 문제가 실측으로 확인됐다. nanmedian은 NaN을 무시하고
+    # 나머지 유효한 프레임들만으로 중앙값을 계산한다.
+    valid_lengths = torso_length[np.isfinite(torso_length)]
+    if valid_lengths.size == 0:
+        raise ValueError(
+            "모든 프레임에서 torso_length(어깨중심-힙중심 거리)를 계산할 수 없습니다 "
+            "(어깨/힙 좌표가 전 프레임 NaN). 마스킹/보간 단계를 먼저 확인하세요."
+        )
+    reference_scale = np.nanmedian(torso_length)
     reference_scale = max(reference_scale, 1e-3)  # 하한선도 더 현실적인 값으로 상향
 
     centered[:, :, sl] = centered[:, :, sl] / reference_scale
