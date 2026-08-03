@@ -60,7 +60,7 @@ def extract_rep_features(
     exercise: str,
     n_dims: int = 2,
     visibility_channel: int = -1,
-    num_phase_bins: int = 10,
+    num_phase_bins: int = 3,
 ) -> dict[str, float]:
     """
     rep 시퀀스 1개에서 exercise에 맞는 각도 기반 특징 딕셔너리를 추출.
@@ -69,14 +69,23 @@ def extract_rep_features(
     min/max/rom(요약 통계) + 구간별(phase-bin) 평균 각도를 함께 반환한다.
     min/max만 쓰면 "언제" 문제가 생겼는지는 알 수 없고(예: rep 전체 중 특정 구간에서만
     잠깐 자세가 무너지는 경우), 그렇다고 시퀀스 전체(100프레임)를 그대로 특징으로 쓰면
-    표본 수(수백 개) 대비 차원이 너무 커져서 공분산 추정이 불가능해진다. 그래서 100프레임을
-    num_phase_bins(기본 10)개 구간으로 나눠 구간별 평균값만 특징으로 쓴다 — "관절 x가
-    rep의 몇 % 지점에서 이상했는지"를 scorer.py의 top_issues에서 그대로 읽을 수 있게 된다.
+    표본 수 대비 차원이 너무 커져서 공분산 추정이 불가능해진다. 그래서 100프레임을
+    num_phase_bins개 구간으로 나눠 구간별 평균값만 특징으로 쓴다.
+
+    num_phase_bins 기본값을 10 -> 3으로 낮췄다 (실측으로 확인된 문제: bin을 10개씩
+    쓰면 관절당 13개, pushup처럼 관절이 4개면 특징이 52개까지 늘어나는데, 그중 상당수
+    (같은 곡선을 10등분한 bin들끼리)가 서로 강하게 상관돼 있다. 표본 수 대비 특징이
+    많고 상관관계까지 강하면, "여러 특징이 동시에 조금씩 벗어나는" 진짜 나쁜 폼이
+    "정상적인 상관 패턴 안의 자연스러운 변동"으로 희석돼 Mahalanobis distance가
+    충분히 커지지 않는 문제가 실제로 발생했다. 3분할은 대부분의 운동이 갖는 자연스러운
+    3단계 구조(내려갈 때/최저점에서 버틸 때/올라갈 때)와도 맞아떨어져서, "언제"
+    정보를 어느 정도 유지하면서 차원과 상관관계를 크게 줄인다.
+
     (아주 짧게 스쳐가는 이탈은 구간 평균에 묻힐 수 있어서, min/max는 안전망으로 계속 유지한다.)
 
-    반환 예 (pushup, num_phase_bins=10): {
+    반환 예 (pushup, num_phase_bins=3): {
         "min_angle_elbow": ..., "max_angle_elbow": ..., "rom_elbow": ...,
-        "elbow_bin00": ..., "elbow_bin01": ..., ..., "elbow_bin09": ...,
+        "elbow_bin00": ..., "elbow_bin01": ..., "elbow_bin02": ...,  # 하강/최저점/상승
         "reliable_side_elbow": "left" 또는 "right" (특징 벡터에는 포함하지 않는 메타데이터 —
             build_dataset이 이 키를 감지해 rep_features.csv에 별도 컬럼으로만 남기고
             학습용 특징 행렬에서는 제외한다)
@@ -108,7 +117,7 @@ def extract_rep_features(
 
 
 def build_feature_matrix(
-    rep_sequences: np.ndarray, exercise: str, n_dims: int = 2, num_phase_bins: int = 10
+    rep_sequences: np.ndarray, exercise: str, n_dims: int = 2, num_phase_bins: int = 3
 ) -> tuple[np.ndarray, list[str]]:
     """
     여러 rep 시퀀스 (N, target_length, J, C)를 한 번에 특징 행렬 (N, num_features)로 변환.

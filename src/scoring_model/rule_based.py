@@ -1,18 +1,28 @@
 """
 src/scoring_model/rule_based.py
 
-Mahalanobis(통계) 채점이 놓치는 "방향성 있는" 특징(스쿼트/팔굽혀펴기 깊이, 몸통/다리
-일직선 여부)에 대해 최소 점수를 보장하는 규칙 기반 채점.
+Mahalanobis(통계) 채점만으로는 놓칠 수 있는 "최소 동작 기준"에 대해 최저점을
+보장하는 규칙 기반 채점.
 
-배경: Mahalanobis distance는 "기준 집단 평균에 가까울수록 좋다"는 전제인데, 깊이처럼
-"평균이 아니라 특정 방향(더 깊이)일수록 좋다"는 특징에는 이 전제가 안 맞는다.
-실제로 기준 영상 평균보다 훨씬 깊게 앉는 사람이 오히려 낮은 점수를 받는 사례가 있었다.
+배경: Mahalanobis distance는 정상 사례 집단과의 통계적 거리로 채점하는데, 표본이
+소수의 영상에 몰려있거나 그 사람의 동작이 기준 집단과 여러 면에서 통계적으로
+크게 다르면, **최소한의 동작 기준(예: 일정 깊이 이상 굽힘)은 충분히 지켰는데도**
+distance가 극단적으로 커져서 거의 0점에 가까운 점수가 나올 수 있다 (실측: 합성
+테스트 데이터로 확인한 사례에서 mahalanobis 단독 0.1점).
+
+**주의**: 이 규칙은 "깊게 앉으면 보상해준다"는 게 아니다. 실제로 확인한 깊은
+스쿼트 사례(기준 평균보다 훨씬 깊게 앉는 두 영상)는 mahalanobis만으로도 이미
+90점대(94.6, 98.3)가 나왔고, 규칙이 개입할 필요도 없었다. 규칙이 실제로 의미를
+갖는 상황은 **"최소 동작 기준은 통과했는데 통계 점수가 (이유를 불문하고) 극단적으로
+낮게 나온" 경우**뿐이다. 즉 규칙은 "잘하면 더 준다"가 아니라 "최소한은 했으면
+바닥까지는 안 떨어지게 막아준다"는 안전망(floor)이다.
 
 설계:
 - 관절별로 규칙 점수(0~50점, 조건 불충족 시 0점)를 계산하고
 - 최종 점수는 `max(모든 규칙 점수, mahalanobis 점수)`로 합친다
-  -> mahalanobis가 이미 잘 준 점수는 그대로 유지하면서, "방향성 있는 좋은 동작인데
-     기준 집단 평균과 달라서 낮게 나온" 경우만 규칙이 구제한다.
+  -> mahalanobis가 이미 더 높은 점수를 줬다면 규칙은 아무 영향도 안 준다.
+     mahalanobis가 최소 동작 기준 통과 대비 비정상적으로 낮게 나왔을 때만
+     규칙이 "최소 이 정도는 보장"하는 바닥 역할을 한다.
 
 관절별 규칙:
 - squat 무릎 / pushup 팔꿈치(굽힘 관절): 일정 깊이 이상 굽혀야(게이트) 규칙이 작동한다.
@@ -143,6 +153,117 @@ RULE_SCORERS = {
 }
 
 
+# -----------------------------
+# 규칙 채점 설명 (explain)
+# -----------------------------
+
+def explain_squat_rule(
+    features: dict, depth_gate: float = 105.0, extension_target: float = 170.0, penalty_width: float = 40.0
+) -> dict:
+    """squat_rule_score의 계산 과정을 단계별 문장으로 풀어서 반환."""
+    min_angle = features["min_angle_knee"]
+    max_angle = features["max_angle_knee"]
+    messages = []
+
+    if min_angle > depth_gate:
+        messages.append(
+            f"무릎 최저각도가 {min_angle:.1f}도로 깊이 기준({depth_gate:.0f}도)을 통과하지 못해 "
+            "규칙이 적용되지 않았습니다 (통계 점수만 사용됨)."
+        )
+        return {"gate_passed": False, "score": 0.0, "messages": messages}
+
+    deficit = max(0.0, extension_target - max_angle)
+    penalty = accelerating_penalty(deficit, penalty_width, max_penalty=25.0)
+    score = 50.0 - penalty
+
+    messages.append(f"무릎 최저각도 {min_angle:.1f}도로 깊이 기준({depth_gate:.0f}도) 통과 → 기본 50.0점")
+    if deficit > 0:
+        messages.append(
+            f"무릎 최고각도가 {max_angle:.1f}도로 목표({extension_target:.0f}도)보다 "
+            f"{deficit:.1f}도 부족 → {penalty:.1f}점 감점"
+        )
+    else:
+        messages.append(f"무릎 최고각도 {max_angle:.1f}도로 목표({extension_target:.0f}도) 이상 → 감점 없음")
+    messages.append(f"최종 규칙 점수: {score:.1f}점")
+
+    return {"gate_passed": True, "score": score, "deficit": deficit, "penalty": penalty, "messages": messages}
+
+
+def explain_pushup_rule(
+    features: dict,
+    elbow_depth_gate: float = 90.0,
+    elbow_extension_target: float = 170.0,
+    elbow_penalty_width: float = 40.0,
+    body_line_target: float = 180.0,
+    body_line_penalty_width: float = 20.0,
+) -> dict:
+    """pushup_rule_score의 계산 과정(elbow 기본점 -> hip/knee 감점)을 단계별 문장으로 풀어서 반환."""
+    min_angle_elbow = features["min_angle_elbow"]
+    messages = []
+
+    if min_angle_elbow > elbow_depth_gate:
+        messages.append(
+            f"팔꿈치 최저각도가 {min_angle_elbow:.1f}도로 깊이 기준({elbow_depth_gate:.0f}도)을 "
+            "통과하지 못해 규칙이 적용되지 않았습니다 (통계 점수만 사용됨)."
+        )
+        return {"gate_passed": False, "score": 0.0, "messages": messages}
+
+    elbow_deficit = max(0.0, elbow_extension_target - features["max_angle_elbow"])
+    elbow_penalty = accelerating_penalty(elbow_deficit, elbow_penalty_width, max_penalty=25.0)
+    elbow_score = 50.0 - elbow_penalty
+    messages.append(f"팔꿈치 최저각도 {min_angle_elbow:.1f}도로 깊이 기준({elbow_depth_gate:.0f}도) 통과 → 기본 50.0점")
+    if elbow_deficit > 0:
+        messages.append(
+            f"팔꿈치 최고각도가 목표({elbow_extension_target:.0f}도)보다 {elbow_deficit:.1f}도 부족 "
+            f"→ {elbow_penalty:.1f}점 감점 (elbow 소계 {elbow_score:.1f}점)"
+        )
+
+    hip_deficit = max(0.0, body_line_target - features["min_angle_hip"])
+    hip_penalty = accelerating_penalty(hip_deficit, body_line_penalty_width, max_penalty=12.5)
+    if hip_deficit > 0:
+        messages.append(
+            f"허리(엉덩이)가 일직선 기준({body_line_target:.0f}도)보다 {hip_deficit:.1f}도 처짐/솟음 "
+            f"→ 추가 {hip_penalty:.1f}점 감점"
+        )
+
+    knee_deficit = max(0.0, body_line_target - features["min_angle_knee"])
+    knee_penalty = accelerating_penalty(knee_deficit, body_line_penalty_width, max_penalty=12.5)
+    if knee_deficit > 0:
+        messages.append(
+            f"다리가 일직선 기준({body_line_target:.0f}도)보다 {knee_deficit:.1f}도 굽음 "
+            f"→ 추가 {knee_penalty:.1f}점 감점"
+        )
+
+    score = max(0.0, elbow_score - hip_penalty - knee_penalty)
+    messages.append(f"최종 규칙 점수: {score:.1f}점")
+
+    return {
+        "gate_passed": True,
+        "score": score,
+        "elbow_penalty": elbow_penalty,
+        "hip_penalty": hip_penalty,
+        "knee_penalty": knee_penalty,
+        "messages": messages,
+    }
+
+
+RULE_EXPLAINERS = {
+    "squat": explain_squat_rule,
+    "pushup": explain_pushup_rule,
+}
+
+
+def explain_rule_score(features: dict, exercise: str) -> dict:
+    """
+    exercise에 맞는 explain 함수를 찾아 규칙 채점 과정을 단계별로 풀어서 반환한다.
+    정의된 규칙이 없는 exercise면 {"gate_passed": False, "score": 0.0, "messages": [...]}를 반환.
+    """
+    explain_fn = RULE_EXPLAINERS.get(exercise)
+    if explain_fn is None:
+        return {"gate_passed": False, "score": 0.0, "messages": [f"'{exercise}'에는 정의된 규칙이 없습니다."]}
+    return explain_fn(features)
+
+
 def score_rep_with_rules(
     features: dict, stats, exercise: str, decay_scale: float = 3.0, top_k_feedback: int = 2
 ) -> dict:
@@ -154,19 +275,26 @@ def score_rep_with_rules(
         모두 들어있어야 한다.
 
     Returns:
-        score_rep()과 동일한 dict에 "score_source"("rule" 또는 "mahalanobis")가 추가된 것.
-        규칙이 최종 점수를 결정했다면 "rule"이라, top_issues(mahalanobis 기준 z-score)가
-        이 경우엔 실제 감점 사유와 안 맞을 수 있다는 걸 유의할 것.
+        score_rep()과 동일한 dict에 아래가 추가된 것:
+        - "score_source": "rule" 또는 "mahalanobis" — 최종 점수가 어느 쪽에서 나왔는지
+        - "rule_explanation": explain_rule_score()의 결과 (게이트 통과 여부, 단계별 감점
+          내역, 사람이 읽을 수 있는 메시지 목록). exercise에 규칙이 없으면 빈 설명이 담김.
+        규칙이 최종 점수를 결정했다면("score_source"=="rule") top_issues/outliers(mahalanobis
+        기준 z-score)가 실제 감점 사유와 안 맞을 수 있으니, 이 경우엔 rule_explanation을
+        우선 참고할 것.
     """
     feature_vector = np.array([features[name] for name in stats.feature_names])
     result = score_rep(feature_vector, stats, top_k_feedback=top_k_feedback, decay_scale=decay_scale)
+
+    rule_explanation = explain_rule_score(features, exercise)
+    result["rule_explanation"] = rule_explanation
 
     rule_fn = RULE_SCORERS.get(exercise)
     if rule_fn is None:
         result["score_source"] = "mahalanobis"
         return result
 
-    rule_score = rule_fn(features)
+    rule_score = rule_explanation["score"]
     if rule_score > result["score"]:
         result["score"] = rule_score
         result["score_source"] = "rule"

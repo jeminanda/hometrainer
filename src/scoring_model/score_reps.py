@@ -3,8 +3,10 @@ src/scoring_model/score_reps.py
 
 학습된 ReferenceStats(models/{exercise}_reference.npz)를 불러와 rep을 채점한다.
 mahalanobis(score_rep) 대신 rule_based.score_rep_with_rules를 써서, exercise별
-규칙 기반 최소점수 보정(예: 깊은 스쿼트/팔굽혀펴기가 기준 평균과 달라서 낮게
-나오는 것을 구제)이 항상 함께 적용된다.
+규칙 기반 최저점 보장(최소 동작 기준을 통과했는데 통계 점수가 극단적으로 낮게
+나온 경우, 최대 50점까지는 보장)이 항상 함께 적용된다. "잘하면 더 준다"가 아니라
+"최소한은 했으면 바닥까지는 안 떨어지게 막아준다"는 안전망이라는 점에 유의할 것
+(자세한 설계 배경은 rule_based.py 참고).
 
 두 가지 사용 시나리오:
 1) 아직 채점 안 해본 새 영상의 rep 시퀀스 하나를 채점 -> score_rep_sequence()
