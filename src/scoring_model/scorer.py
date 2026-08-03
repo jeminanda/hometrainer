@@ -130,7 +130,7 @@ def distance_to_score(
     distance: float,
     stats: ReferenceStats,
     method: str = "threshold",
-    inside_percentile: float = 90.0,
+    inside_percentile: float = 95.0,
     decay_scale: float = 3.0,
 ) -> float:
     """
